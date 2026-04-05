@@ -1,0 +1,19 @@
+torch
+transformers
+datasets
+sentence-transformers
+wandb
+tqdm
+peft
+kagglehub
+# Arithmetic coding (real bitstream — optional but strongly recommended)
+torchac
+# Classical compression baselines for eval_rd.py
+zstandard
+brotli
+# Quality metrics for eval_rd.py and loss.py
+rouge-score
+bert-score
+# NLI entailment evaluator (idea-completeness metric — the primary quality signal)
+# Model: cross-encoder/nli-deberta-v3-small (~300MB, fast, accurate)
+# Loaded automatically via transformers; no extra pip package needed beyond transformers.
