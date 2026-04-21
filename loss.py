@@ -259,6 +259,15 @@ class RateDistortionLoss(nn.Module):
         # It smoothly ramps down to 0 as rate_scale ramps up to 1.
         gate_warmup_loss = F.binary_cross_entropy(gate_target, torch.ones_like(gate_target)) * (1.0 - rate_scale)
 
+        # ── Minimum-active-gates floor (hard anti-collapse) ───────────────────
+        # Even with gate_warmup and ramp, mode collapse can win if the decoder
+        # hasn't learned to use the bottleneck. This ReLU hinge penalises the
+        # batch-mean active count dropping below MIN_GATES. Weight fades but
+        # never vanishes while rate_scale < 2.0 (i.e. always on in Stages 1–2).
+        MIN_GATES = 8
+        avg_active = gate_target.sum(dim=1).mean()
+        min_gate_loss = F.relu(MIN_GATES - avg_active) * 0.5 * (1.0 - rate_scale * 0.5)
+
         # ── Semantic CoSENT (supplementary) ───────────────────────────────────
         if config.LAMBDA_SEM > 0 and self.sbert is not None:
             sem_loss = self._semantic_loss(recon_logits, input_ids, input_attention_mask)
@@ -266,7 +275,7 @@ class RateDistortionLoss(nn.Module):
         else:
             sem_loss = torch.tensor(0.0, device=self.device)
 
-        total = distortion + nli_weighted + code_rate_loss + gate_rate_loss + gate_warmup_loss + sem_loss
+        total = distortion + nli_weighted + code_rate_loss + gate_rate_loss + gate_warmup_loss + min_gate_loss + sem_loss
         if return_nli_per_item:
-            return total, distortion, nli, code_rate_loss, gate_rate_loss, sem_loss, p_entail_per_item
-        return total, distortion, nli, code_rate_loss, gate_rate_loss, sem_loss
+            return total, distortion, nli, code_rate_loss, gate_rate_loss, sem_loss, min_gate_loss, p_entail_per_item
+        return total, distortion, nli, code_rate_loss, gate_rate_loss, sem_loss, min_gate_loss

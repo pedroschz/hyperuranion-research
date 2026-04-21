@@ -2,7 +2,7 @@
 BATCH_SIZE = 8               # reduced from 16: longer sequences + larger bottleneck
 MAX_LENGTH = 128             # up from 64: arguments/reasoning chains span multiple sentences
 LEARNING_RATE = 2e-4         # 2e-4 is needed for randomly initialized Perceiver/FSQ to learn
-NUM_EPOCHS = 5
+NUM_EPOCHS = 12
 
 # ─── LoRA ───────────────────────────────────────────────────────────────────────
 LORA_RANK = 16
@@ -44,7 +44,7 @@ ENTROPY_MODEL_LAYERS = 3
 # the hard constraint; compression ratio is the objective to maximise subject to it.
 # Increase λ_rate only after reconstruction quality (entailment ≥ 0.85) is established.
 LAMBDA_RATE = 0.005          # lowered from 0.01: gentler ramp prevents snap collapse
-LAMBDA_GATE = 0.005
+LAMBDA_GATE = 0.001          # was 0.005 — too aggressive, incentivized full gate closure
 LAMBDA_SEM = 0.0             # disabled: NLI strictly dominates CoSENT as quality signal,
                              # and removing SBERT (~66M params) saves ~1GB GPU memory.
                              # Re-enable only if NLI signal is noisy on your hardware.
@@ -63,11 +63,11 @@ GATE_THRESHOLD = 0.5
 # The decoder cannot reconstruct masked positions from local context alone,
 # so it is mathematically forced to attend to the bottleneck.
 # 0.4 = 40% of input tokens are dropped (never the first BOS or padding tokens).
-WORD_DROPOUT = 0.4
+WORD_DROPOUT = 0.85          # was 0.4 — BART's pretrained LM prior easily defeats 0.4; 0.85 forces decoder to attend to bottleneck
 
 # ─── Training curriculum ───────────────────────────────────────────────────────
 # Stage 1 [0, STAGE2_START):  rate off → model learns to encode all ideas
 # Stage 2 [STAGE2_START, STAGE3_START): rate on → compress without losing ideas
 # Stage 3 [STAGE3_START, NUM_EPOCHS): freeze backbone → refine entropy model
-STAGE2_START = 2
-STAGE3_START = 4
+STAGE2_START = 5
+STAGE3_START = 10

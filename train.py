@@ -373,9 +373,9 @@ def train():
                     return_nli_per_item=want_scatter,
                 )
                 if want_scatter:
-                    total, distortion, nli, code_rate, gate_rate, semantic, p_entail_items = criterion_out
+                    total, distortion, nli, code_rate, gate_rate, semantic, min_gate, p_entail_items = criterion_out
                 else:
-                    total, distortion, nli, code_rate, gate_rate, semantic = criterion_out
+                    total, distortion, nli, code_rate, gate_rate, semantic, min_gate = criterion_out
                     p_entail_items = None
 
                 if math.isnan(total.item()):
@@ -383,6 +383,71 @@ def train():
                     continue
 
                 total.backward()
+
+                # ── Gate-logit health monitor ─────────────────────────────────
+                # Cheap probe of gate_net output magnitudes. If logit_mean drifts
+                # sharply negative early in training, collapse is imminent — halt
+                # the run rather than waste compute.
+                if global_step % 50 == 0:
+                    with torch.no_grad():
+                        probe_pooled = model._encode_to_slots(
+                            input_ids[:1], attention_mask[:1]
+                        )
+                        gate_logit_vals = model.gate_net(probe_pooled).squeeze(-1)
+                        z_in_probe = model.fsq_proj(model.fsq_pre_ln(probe_pooled))
+                        soft_mean = torch.sigmoid(gate_logit_vals).mean().item()
+                        probe_log = {
+                            "gates/logit_mean": gate_logit_vals.mean().item(),
+                            "gates/logit_min": gate_logit_vals.min().item(),
+                            "gates/logit_max": gate_logit_vals.max().item(),
+                            "gates/soft_mean": soft_mean,
+                            "bottleneck/z_in_norm": z_in_probe.norm(dim=-1).mean().item(),
+                            "step": global_step,
+                        }
+                        # Gradient-norm health on the two layers most prone to dying.
+                        if model.fsq_proj.weight.grad is not None:
+                            probe_log["grad/fsq_proj_weight_norm"] = (
+                                model.fsq_proj.weight.grad.norm().item()
+                            )
+                        gate_last = model.gate_net[-1]
+                        if gate_last.weight.grad is not None:
+                            probe_log["grad/gate_net_last_weight_norm"] = (
+                                gate_last.weight.grad.norm().item()
+                            )
+                        wandb.log(probe_log)
+
+                        # Early-abort kill-switch: in Stage 1, soft_mean must
+                        # stay near 1.0 (warmup + min_gate force it). Sustained
+                        # collapse by step 500 means the run is unrecoverable.
+                        if (
+                            global_step >= 500
+                            and rate_scale == 0.0
+                            and soft_mean < 0.3
+                        ):
+                            raise RuntimeError(
+                                f"Gate collapse detected at step {global_step}: "
+                                f"soft_mean={soft_mean:.3f} in Stage 1. Aborting."
+                            )
+
+                # ── Per-slot code-index entropy (every 200 steps) ────────────
+                # Uniform entropy ≈ log2(codebook_size) means the slot carries
+                # no information the decoder cares about; collapsed near 0 means
+                # dead slot. Healthy slots sit in the middle.
+                if global_step % 200 == 0:
+                    with torch.no_grad():
+                        K = int(model.fsq.codebook_size)
+                        # flat_idx: [B, Q]
+                        onehot = torch.nn.functional.one_hot(
+                            flat_idx, num_classes=K
+                        ).float()  # [B, Q, K]
+                        p = onehot.mean(dim=0).clamp_min(1e-12)  # [Q, K]
+                        H_per_slot = -(p * p.log2()).sum(dim=-1)  # [Q]
+                        wandb.log({
+                            "bottleneck/code_entropy_mean": H_per_slot.mean().item(),
+                            "bottleneck/code_entropy_min": H_per_slot.min().item(),
+                            "bottleneck/code_entropy_max": H_per_slot.max().item(),
+                            "step": global_step,
+                        })
 
                 # ── Gradient ratio: NLI vs CE at the bottleneck ───────────────
                 # Measures whether NLI is actually moving the bottleneck weights,
@@ -418,6 +483,7 @@ def train():
                     "loss/code_rate": code_rate.item(),
                     "loss/gate_rate": gate_rate.item(),
                     "loss/semantic": semantic.item(),
+                    "loss/min_gate": min_gate.item(),
                     "compression/avg_active_gates": avg_active,
                     "compression/entropy_bits": entropy_bits,
                     "train/rate_scale": rate_scale,
@@ -483,6 +549,42 @@ def train():
                 f"sem: {epoch_losses['semantic']/n:.4f}"
             )
 
+            # ── Shuffle-MI probe: the definitive posterior-collapse test ─────
+            # If decoder CE is ~unchanged when z_q is permuted across the batch,
+            # the decoder is ignoring the bottleneck and no amount of gate
+            # tuning will help.
+            try:
+                model.eval()
+                with torch.no_grad():
+                    probe_batch = next(iter(dataloader))
+                    ids_p = probe_batch["input_ids"].to(device)
+                    msk_p = probe_batch["attention_mask"].to(device)
+                    lbl_p = probe_batch["labels"].to(device)
+                    pooled_p = model._encode_to_slots(ids_p, msk_p)
+                    z_q_p, _, gates_p, _, _ = model._quantise(pooled_p)
+                    base = model.bart.get_base_model()
+                    from transformers.models.bart.modeling_bart import shift_tokens_right as _sh
+                    dec_ids_p = _sh(lbl_p, base.config.pad_token_id, base.config.decoder_start_token_id)
+                    logits_real = model._decode(z_q_p, gates_p, dec_ids_p)
+                    perm = torch.randperm(z_q_p.size(0), device=device)
+                    logits_shuf = model._decode(z_q_p[perm], gates_p[perm], dec_ids_p)
+                    V = logits_real.shape[-1]
+                    ce = torch.nn.CrossEntropyLoss(ignore_index=-100)
+                    ce_real = ce(logits_real.reshape(-1, V), lbl_p.reshape(-1)).item()
+                    ce_shuf = ce(logits_shuf.reshape(-1, V), lbl_p.reshape(-1)).item()
+                    wandb.log({
+                        "probe/ce_real": ce_real,
+                        "probe/ce_shuffled": ce_shuf,
+                        "probe/shuffle_gap": ce_shuf - ce_real,
+                        "epoch": epoch + 1,
+                    })
+                    print(f"  [Shuffle-MI] CE real={ce_real:.3f}  shuffled={ce_shuf:.3f}  gap={ce_shuf-ce_real:+.3f}")
+                    if ce_shuf - ce_real < 0.1:
+                        print("    WARN: decoder is nearly independent of bottleneck — posterior collapse.")
+                model.train()
+            except Exception as e:
+                print(f"  [Shuffle-MI probe skipped: {e}]")
+
             ckpt_path = f"checkpoint_epoch_{epoch+1}.pt"
             torch.save(model.state_dict(), ckpt_path)
             print(f"  Saved {ckpt_path}")
@@ -516,6 +618,16 @@ def _eval_sample(model, tokenizer, device, global_step):
         gen_ids = model.decompress_from_indices(indices, gate_mask, max_length=128, num_beams=4)
         recon = tokenizer.decode(gen_ids[0], skip_special_tokens=True)
 
+        # Random-code baseline: if this decodes to similar-quality output,
+        # the decoder has memorized the prior and isn't using the bottleneck.
+        rand_indices = torch.stack([
+            torch.randint(0, int(L), indices.shape[:-1] + (1,), device=device).squeeze(-1)
+            for L in config.FSQ_LEVELS
+        ], dim=-1)
+        all_open = torch.ones_like(gate_mask)
+        rand_ids = model.decompress_from_indices(rand_indices, all_open, max_length=128, num_beams=4)
+        rand_recon = tokenizer.decode(rand_ids[0], skip_special_tokens=True)
+
         orig_tokens = len(tokenizer.encode(text, add_special_tokens=False))
         # Baseline: Huffman over BPE frequencies ≈ 10–11 bits/token for English
         huffman_bits = orig_tokens * 10.5
@@ -526,6 +638,7 @@ def _eval_sample(model, tokenizer, device, global_step):
         print(f"  Payload bits:   {num_bits:.1f}  (entropy model est: {entropy_bits:.1f})")
         print(f"  vs Huffman BPE: {ratio_vs_huffman:.1f}% reduction")
         print(f"  Recon: {recon[:120]}...")
+        print(f"  RandCode: {rand_recon[:120]}...")
 
         wandb.log({
             "eval/payload_bits": num_bits,
@@ -533,6 +646,7 @@ def _eval_sample(model, tokenizer, device, global_step):
             "eval/active_gates": gate_mask.float().sum().item(),
             "eval/ratio_vs_huffman_pct": ratio_vs_huffman,
             "eval/reconstruction": wandb.Html(recon),
+            "eval/random_code_recon": wandb.Html(rand_recon),
         })
     model.train()
 
