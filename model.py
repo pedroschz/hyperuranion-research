@@ -46,6 +46,12 @@ class SemanticAutoencoder(nn.Module):
         self.bart = get_peft_model(bart, lora_cfg)
         self.bart.print_trainable_parameters()
 
+        # BartConfig doesn't expose mask_token_id; it lives on the tokenizer.
+        # For facebook/bart-base this is 50264. Cache once here so word-dropout
+        # doesn't need a tokenizer round-trip per step.
+        from transformers import BartTokenizer
+        self.mask_token_id = BartTokenizer.from_pretrained("facebook/bart-base").mask_token_id
+
         H = self.bart.get_base_model().config.hidden_size  # 768 for bart-base
 
         # ── 2. Iterative Perceiver cross-attention ─────────────────────────────
@@ -233,7 +239,7 @@ class SemanticAutoencoder(nn.Module):
             dropout_mask = torch.rand(dec_ids.shape, device=dec_ids.device) < config.WORD_DROPOUT
             dropout_mask[:, 0] = False  # never mask the BOS / decoder start token
             dropout_mask &= (dec_ids != base.config.pad_token_id)  # never mask padding
-            dec_ids = dec_ids.masked_fill(dropout_mask, base.config.mask_token_id)
+            dec_ids = dec_ids.masked_fill(dropout_mask, self.mask_token_id)
 
         recon_logits = self._decode(z_q, decoder_gates, dec_ids)
         return recon_logits, gates, gates_soft, z_qh, flat_idx, log_probs
