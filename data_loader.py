@@ -33,6 +33,14 @@ def get_dataloader(split: str = "train"):
         lambda x: len(x["source"].strip().split()) > 10
     )
 
+    # Cap dataset size so each epoch is tractable on a single GPU.
+    # Full WikiLarge (~296k examples) → 35k steps/epoch → 420k steps total.
+    # At 4k steps/epoch: 12 epochs = 48k steps total (~4-6 hours on T4).
+    # Increase MAX_TRAIN_SAMPLES for final training runs.
+    MAX_TRAIN_SAMPLES = 32_000
+    if split == "train" and len(dataset) > MAX_TRAIN_SAMPLES:
+        dataset = dataset.select(range(MAX_TRAIN_SAMPLES))
+
     def tokenize_function(examples):
         # Encoder input: the source text (complex, information-rich)
         inputs = tokenizer(
