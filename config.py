@@ -2,7 +2,7 @@
 BATCH_SIZE = 8               # reduced from 16: longer sequences + larger bottleneck
 MAX_LENGTH = 128             # up from 64: arguments/reasoning chains span multiple sentences
 LEARNING_RATE = 2e-4         # 2e-4 is needed for randomly initialized Perceiver/FSQ to learn
-NUM_EPOCHS = 12
+NUM_EPOCHS = 9
 
 # ─── LoRA ───────────────────────────────────────────────────────────────────────
 LORA_RANK = 16
@@ -69,5 +69,5 @@ WORD_DROPOUT = 0.85          # was 0.4 — BART's pretrained LM prior easily def
 # Stage 1 [0, STAGE2_START):  rate off → model learns to encode all ideas
 # Stage 2 [STAGE2_START, STAGE3_START): rate on → compress without losing ideas
 # Stage 3 [STAGE3_START, NUM_EPOCHS): freeze backbone → refine entropy model
-STAGE2_START = 5
-STAGE3_START = 10
+STAGE2_START = 4    # was 5 — adjusted for 9-epoch budget
+STAGE3_START = 7    # was 10 — adjusted for 9-epoch budget

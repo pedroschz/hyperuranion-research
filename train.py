@@ -360,6 +360,12 @@ def train():
                 if recon_logits.requires_grad:
                     recon_logits.retain_grad()
 
+                # NLI (BART-large-mnli) is ~3x the compute of the base model.
+                # In Stage 1, CE is the primary signal — NLI's semantic constraint
+                # only becomes critical in Stage 2 when compression forces tradeoffs.
+                # Disabling it in Stage 1 cuts total training time by ~40%.
+                nli_active = rate_scale > 0.0
+
                 criterion_out = criterion(
                     recon_logits=recon_logits,
                     gates=gates,
@@ -371,6 +377,7 @@ def train():
                     log_probs=log_probs,
                     rate_scale=rate_scale,
                     return_nli_per_item=want_scatter,
+                    nli_active=nli_active,
                 )
                 if want_scatter:
                     total, distortion, nli, code_rate, gate_rate, semantic, min_gate, p_entail_items = criterion_out

@@ -211,6 +211,7 @@ class RateDistortionLoss(nn.Module):
         rate_scale: float = 0.0,
         return_nli_per_item: bool = False,    # for scatter logging: p_entail per sample
         gates_soft: torch.Tensor = None,      # [B, Q] smooth probabilities for gating loss
+        nli_active: bool = True,              # disable in Stage 1 to save ~3x compute
     ):
         """
         Returns:
@@ -223,7 +224,7 @@ class RateDistortionLoss(nn.Module):
 
         # ── NLI entailment (differentiable idea-completeness signal) ──────────
         p_entail_per_item = None
-        if config.LAMBDA_NLI > 0 and self.nli_loss is not None:
+        if config.LAMBDA_NLI > 0 and self.nli_loss is not None and nli_active:
             if return_nli_per_item:
                 nli, p_entail_per_item = self.nli_loss(
                     recon_logits, input_ids, input_attention_mask, return_per_item=True
