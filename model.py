@@ -75,14 +75,11 @@ class SemanticAutoencoder(nn.Module):
         # so fsq_proj's gradient signal isn't dominated by slot-norm drift.
         self.fsq_pre_ln = nn.LayerNorm(H)
         self.fsq_proj = nn.Linear(H, config.FSQ_DIMS)
-        # Explicit init: default fan-in scaling on 768→4 yields near-zero pre-FSQ
-        # activations, collapsing every code to the codebook center. Use larger std.
-        nn.init.normal_(self.fsq_proj.weight, std=0.1)
+        # std=0.05: with LayerNorm input (unit std, 768 dims), output per dim ≈
+        # 0.05 * sqrt(768) ≈ 1.38 → tanh(1.38) ≈ 0.88 — codes use ~88% of FSQ
+        # range without saturating. std=0.1 was too large (z_in→60, full saturation).
+        nn.init.normal_(self.fsq_proj.weight, std=0.05)
         nn.init.zeros_(self.fsq_proj.bias)
-        # Learnable per-dim output scale: prevents the projection from quietly
-        # shrinking z_in toward zero (which collapses all codes to codebook center).
-        # Initialised to 2.0 so tanh(2.0*x) starts in a useful range.
-        self.fsq_proj_scale = nn.Parameter(torch.ones(config.FSQ_DIMS) * 2.0)
         self.fsq = FiniteScalarQuantizer(levels=config.FSQ_LEVELS)
         self.fsq_unproj = nn.Linear(config.FSQ_DIMS, H)
 
@@ -151,7 +148,7 @@ class SemanticAutoencoder(nn.Module):
             gates_soft: [B, Q]            soft gate probabilities (for loss)
             flat_idx:   [B, Q]            long — flat mixed-radix index per slot
         """
-        z_in = self.fsq_proj(self.fsq_pre_ln(pooled)) * self.fsq_proj_scale  # [B, Q, FSQ_DIMS]
+        z_in = self.fsq_proj(self.fsq_pre_ln(pooled)).clamp(-3.0, 3.0)  # [B, Q, FSQ_DIMS]
         z_q, z_qh = self.fsq(z_in)            # both [B, Q, FSQ_DIMS]
 
         # Derive per-dim integer indices from z_in (same values as z_qh, but integer).
@@ -260,7 +257,7 @@ class SemanticAutoencoder(nn.Module):
         """
         with torch.no_grad():
             pooled = self._encode_to_slots(input_ids, attention_mask)
-            z_in = self.fsq_proj(self.fsq_pre_ln(pooled)) * self.fsq_proj_scale
+            z_in = self.fsq_proj(self.fsq_pre_ln(pooled)).clamp(-3.0, 3.0)
             indices = self.fsq.to_indices(z_in)          # [B, Q, FSQ_DIMS]
             flat_idx = self.fsq.to_flat_index(indices)   # [B, Q]
 
@@ -325,7 +322,7 @@ class SemanticAutoencoder(nn.Module):
         """
         with torch.no_grad():
             pooled = self._encode_to_slots(input_ids, attention_mask)
-            z_in = self.fsq_proj(self.fsq_pre_ln(pooled)) * self.fsq_proj_scale
+            z_in = self.fsq_proj(self.fsq_pre_ln(pooled)).clamp(-3.0, 3.0)
             indices = self.fsq.to_indices(z_in)
             flat_idx = self.fsq.to_flat_index(indices)
             gate_logits = self.gate_net(pooled).squeeze(-1)
