@@ -397,6 +397,8 @@ def train():
                         z_in_probe = model.fsq_proj(model.fsq_pre_ln(probe_pooled))
                         soft_mean = torch.sigmoid(gate_logit_vals).mean().item()
                         probe_log = {
+                            "bottleneck/fsq_proj_scale_mean": model.fsq_proj_scale.mean().item(),
+                            "bottleneck/fsq_proj_scale_min": model.fsq_proj_scale.min().item(),
                             "gates/logit_mean": gate_logit_vals.mean().item(),
                             "gates/logit_min": gate_logit_vals.min().item(),
                             "gates/logit_max": gate_logit_vals.max().item(),
